@@ -73,17 +73,20 @@ export async function initDB() {
   ], 'deferred');
 
   // Seed default settings from env vars (only if not already set)
-  const defaults = [
-    { key: 'whatsapp_number', value: process.env.VITE_WHATSAPP_NUMBER || process.env.WHATSAPP_NUMBER || '' },
-    { key: 'brand_name', value: process.env.VITE_BRAND_NAME || process.env.BRAND_NAME || 'Jordan Imports' },
-  ];
-  for (const { key, value } of defaults) {
-    if (!value) continue;
+  const defaultWhatsappNumber = process.env.VITE_WHATSAPP_NUMBER || process.env.WHATSAPP_NUMBER || '';
+  const defaultBrandName = process.env.VITE_BRAND_NAME || process.env.BRAND_NAME || 'HopeLink Imports';
+
+  if (defaultWhatsappNumber) {
     await client.execute({
-      sql: 'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
-      args: [key, value],
+      sql: 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = CURRENT_TIMESTAMP',
+      args: ['whatsapp_number', defaultWhatsappNumber],
     });
   }
+
+  await client.execute({
+    sql: 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = CURRENT_TIMESTAMP',
+    args: ['brand_name', defaultBrandName],
+  });
 
   console.log('Database tables initialized');
 }
