@@ -3,11 +3,14 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import client, { initDB } from './database.js';
 import bcryptjs from 'bcryptjs';
+import crypto from 'crypto';
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET || process.env.TURSO_AUTH_TOKEN || 'change-this-admin-token-secret';
+const ADMIN_TOKEN_TTL_MS = 1000 * 60 * 60 * 12;
 
 // Middleware
 app.use(cors());
@@ -16,6 +19,7 @@ app.use(express.json());
 // Helper function to generate IDs
 const getId = () => Math.random().toString(36).substring(2, 11);
 const normalizeTrackingId = (value = '') => value.trim().replace(/\s+/g, '').toUpperCase();
+const normalizeEmail = (value = '') => String(value).trim().toLowerCase();
 const parseJsonArray = (value) => {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string' || !value.trim()) return [];
@@ -49,6 +53,73 @@ const mapPackageRow = (row) => ({
   ...row,
   packageItems: sanitizePackageItems(row.packageItems),
 });
+const createTokenSignature = (payload) =>
+  crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('base64url');
+const createAdminToken = (admin) => {
+  const payload = Buffer.from(
+    JSON.stringify({
+      sub: admin.id,
+      email: admin.email,
+      name: admin.name || 'Admin',
+      type: 'admin',
+      exp: Date.now() + ADMIN_TOKEN_TTL_MS,
+    })
+  ).toString('base64url');
+
+  return `${payload}.${createTokenSignature(payload)}`;
+};
+const verifyAdminToken = (token) => {
+  if (!token || typeof token !== 'string') return null;
+
+  const [payload, signature] = token.split('.');
+  if (!payload || !signature) return null;
+
+  const expectedSignature = createTokenSignature(payload);
+  const providedBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expectedSignature);
+
+  if (providedBuffer.length !== expectedBuffer.length) return null;
+  if (!crypto.timingSafeEqual(providedBuffer, expectedBuffer)) return null;
+
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (decoded.type !== 'admin' || !decoded.sub || !decoded.exp || decoded.exp < Date.now()) {
+      return null;
+    }
+    return decoded;
+  } catch {
+    return null;
+  }
+};
+const getBearerToken = (req) => {
+  const authorizationHeader = req.headers.authorization || '';
+  if (!authorizationHeader.startsWith('Bearer ')) return '';
+  return authorizationHeader.slice(7).trim();
+};
+const getAdminById = async (id) => {
+  const result = await client.execute({ sql: 'SELECT id, email, name FROM admins WHERE id = ?', args: [id] });
+  return result.rows[0] || null;
+};
+const requireAdminAuth = async (req, res, next) => {
+  try {
+    const token = getBearerToken(req);
+    const payload = verifyAdminToken(token);
+
+    if (!payload) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const admin = await getAdminById(payload.sub);
+    if (!admin) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    req.admin = admin;
+    next();
+  } catch {
+    res.status(401).json({ error: 'Unauthorized' });
+  }
+};
 
 // Initialize DB tables — store promise so routes can await it
 const dbReady = initDB().catch(console.error);
@@ -80,7 +151,7 @@ app.get('/api/products/:id', async (req, res) => {
   }
 });
 
-app.post('/api/products', async (req, res) => {
+app.post('/api/products', requireAdminAuth, async (req, res) => {
   const { name, description, price, categoryId, image, stock, isFeatured, status, estimatedDelivery } = req.body;
   const id = getId();
   try {
@@ -94,7 +165,7 @@ app.post('/api/products', async (req, res) => {
   }
 });
 
-app.put('/api/products/:id', async (req, res) => {
+app.put('/api/products/:id', requireAdminAuth, async (req, res) => {
   const { name, description, price, categoryId, image, stock, isFeatured, status, estimatedDelivery } = req.body;
   try {
     await client.execute({
@@ -107,7 +178,7 @@ app.put('/api/products/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/products/:id', async (req, res) => {
+app.delete('/api/products/:id', requireAdminAuth, async (req, res) => {
   try {
     await client.execute({ sql: 'DELETE FROM products WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -137,7 +208,7 @@ app.get('/api/categories/:id', async (req, res) => {
   }
 });
 
-app.post('/api/categories', async (req, res) => {
+app.post('/api/categories', requireAdminAuth, async (req, res) => {
   const { name, slug, description } = req.body;
   const id = getId();
   const computedSlug = slug || name.toLowerCase().replace(/\s+/g, '-');
@@ -153,7 +224,7 @@ app.post('/api/categories', async (req, res) => {
   }
 });
 
-app.put('/api/categories/:id', async (req, res) => {
+app.put('/api/categories/:id', requireAdminAuth, async (req, res) => {
   const { name, slug, description } = req.body;
   const computedSlug = slug || name.toLowerCase().replace(/\s+/g, '-');
   try {
@@ -167,7 +238,7 @@ app.put('/api/categories/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/categories/:id', async (req, res) => {
+app.delete('/api/categories/:id', requireAdminAuth, async (req, res) => {
   try {
     await client.execute({ sql: 'DELETE FROM categories WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -192,7 +263,7 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-app.get('/api/orders', async (req, res) => {
+app.get('/api/orders', requireAdminAuth, async (req, res) => {
   try {
     const result = await client.execute('SELECT * FROM orders ORDER BY createdAt DESC');
     const rows = result.rows.map(row => ({ ...row, items: JSON.parse(row.items) }));
@@ -202,7 +273,7 @@ app.get('/api/orders', async (req, res) => {
   }
 });
 
-app.get('/api/orders/:id', async (req, res) => {
+app.get('/api/orders/:id', requireAdminAuth, async (req, res) => {
   try {
     const result = await client.execute({ sql: 'SELECT * FROM orders WHERE id = ?', args: [req.params.id] });
     if (!result.rows[0]) return res.status(404).json({ error: 'Order not found' });
@@ -215,7 +286,7 @@ app.get('/api/orders/:id', async (req, res) => {
 
 // ============ PACKAGES ENDPOINTS ============
 
-app.get('/api/packages', async (req, res) => {
+app.get('/api/packages', requireAdminAuth, async (req, res) => {
   try {
     const result = await client.execute('SELECT * FROM packages ORDER BY createdAt DESC');
     res.json(result.rows.map(mapPackageRow));
@@ -236,7 +307,7 @@ app.get('/api/packages/track/:trackingId', async (req, res) => {
   }
 });
 
-app.post('/api/packages', async (req, res) => {
+app.post('/api/packages', requireAdminAuth, async (req, res) => {
   const { trackingId, orderId, status, shippingRoute, origin, destination, currentLocation, estimatedDelivery, weight, notes, packageItems } = req.body;
   const id = getId();
   const normalizedTrackingId = normalizeTrackingId(trackingId ?? '');
@@ -254,7 +325,7 @@ app.post('/api/packages', async (req, res) => {
   }
 });
 
-app.put('/api/packages/:id', async (req, res) => {
+app.put('/api/packages/:id', requireAdminAuth, async (req, res) => {
   try {
     const existingResult = await client.execute({ sql: 'SELECT * FROM packages WHERE id = ?', args: [req.params.id] });
     const existingPackage = existingResult.rows[0];
@@ -305,7 +376,7 @@ app.put('/api/packages/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/packages/:id', async (req, res) => {
+app.delete('/api/packages/:id', requireAdminAuth, async (req, res) => {
   try {
     await client.execute({ sql: 'DELETE FROM packages WHERE id = ?', args: [req.params.id] });
     res.json({ success: true });
@@ -319,15 +390,26 @@ app.delete('/api/packages/:id', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
   try {
-    const result = await client.execute({ sql: 'SELECT * FROM admins WHERE email = ?', args: [email] });
+    const normalizedEmail = normalizeEmail(email);
+    if (!normalizedEmail || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    const result = await client.execute({ sql: 'SELECT * FROM admins WHERE email = ?', args: [normalizedEmail] });
     const row = result.rows[0];
     if (!row) return res.status(401).json({ error: 'Invalid credentials' });
     const isValid = await bcryptjs.compare(password, row.password);
     if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
-    res.json({ success: true, email: row.email, name: row.name });
+    const admin = { id: row.id, email: row.email, name: row.name || 'Admin' };
+    const token = createAdminToken(admin);
+    res.json({ success: true, token, admin });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.get('/api/auth/me', requireAdminAuth, async (req, res) => {
+  res.json({ success: true, admin: req.admin });
 });
 
 // ============ HEALTH CHECK ============
@@ -351,7 +433,7 @@ app.get('/api/settings', async (req, res) => {
   }
 });
 
-app.put('/api/settings/:key', async (req, res) => {
+app.put('/api/settings/:key', requireAdminAuth, async (req, res) => {
   const { value } = req.body;
   const { key } = req.params;
   try {
