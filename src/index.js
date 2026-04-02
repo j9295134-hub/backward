@@ -15,6 +15,7 @@ app.use(express.json());
 
 // Helper function to generate IDs
 const getId = () => Math.random().toString(36).substring(2, 11);
+const normalizeTrackingId = (value = '') => value.trim().replace(/\s+/g, '').toUpperCase();
 
 // Initialize DB tables — store promise so routes can await it
 const dbReady = initDB().catch(console.error);
@@ -192,7 +193,9 @@ app.get('/api/packages', async (req, res) => {
 
 app.get('/api/packages/track/:trackingId', async (req, res) => {
   try {
-    const result = await client.execute({ sql: 'SELECT * FROM packages WHERE trackingId = ?', args: [req.params.trackingId] });
+    const trackingId = normalizeTrackingId(req.params.trackingId || '');
+    if (!trackingId) return res.status(400).json({ error: 'Tracking ID is required' });
+    const result = await client.execute({ sql: 'SELECT * FROM packages WHERE UPPER(TRIM(trackingId)) = ?', args: [trackingId] });
     if (!result.rows[0]) return res.status(404).json({ error: 'Package not found' });
     res.json(result.rows[0]);
   } catch (err) {
@@ -203,12 +206,14 @@ app.get('/api/packages/track/:trackingId', async (req, res) => {
 app.post('/api/packages', async (req, res) => {
   const { trackingId, orderId, status, shippingRoute, origin, destination, currentLocation, estimatedDelivery, weight, notes } = req.body;
   const id = getId();
+  const normalizedTrackingId = normalizeTrackingId(trackingId ?? '');
   try {
+    if (!normalizedTrackingId) return res.status(400).json({ error: 'Tracking ID is required' });
     await client.execute({
       sql: 'INSERT INTO packages (id, trackingId, orderId, status, shippingRoute, origin, destination, currentLocation, estimatedDelivery, weight, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      args: [id, trackingId ?? null, orderId ?? null, status ?? 'pending', shippingRoute ?? 'sea', origin ?? null, destination ?? null, currentLocation ?? null, estimatedDelivery ?? null, weight ?? null, notes ?? null],
+      args: [id, normalizedTrackingId, orderId ?? null, status ?? 'pending', shippingRoute ?? 'sea', origin ?? null, destination ?? null, currentLocation ?? null, estimatedDelivery ?? null, weight ?? null, notes ?? null],
     });
-    res.status(201).json({ id, trackingId, orderId, status: status || 'pending', shippingRoute: shippingRoute || 'sea', origin, destination, currentLocation, estimatedDelivery, weight, notes });
+    res.status(201).json({ id, trackingId: normalizedTrackingId, orderId, status: status || 'pending', shippingRoute: shippingRoute || 'sea', origin, destination, currentLocation, estimatedDelivery, weight, notes });
   } catch (err) {
     if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Tracking ID already exists' });
     res.status(500).json({ error: err.message });
