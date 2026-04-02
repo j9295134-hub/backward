@@ -11,15 +11,33 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const ADMIN_TOKEN_SECRET = process.env.ADMIN_TOKEN_SECRET || process.env.TURSO_AUTH_TOKEN || 'change-this-admin-token-secret';
 const ADMIN_TOKEN_TTL_MS = 1000 * 60 * 60 * 12;
-
-// Middleware
-app.use(cors());
-app.use(express.json());
+const DEFAULT_ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'http://localhost:4173',
+  'http://127.0.0.1:4173',
+];
 
 // Helper function to generate IDs
 const getId = () => Math.random().toString(36).substring(2, 11);
 const normalizeTrackingId = (value = '') => value.trim().replace(/\s+/g, '').toUpperCase();
 const normalizeEmail = (value = '') => String(value).trim().toLowerCase();
+const normalizeOrigin = (value = '') => {
+  const trimmedValue = String(value || '').trim();
+  if (!trimmedValue) return '';
+
+  try {
+    return new URL(trimmedValue).origin;
+  } catch {
+    return '';
+  }
+};
+const parseOriginList = (...values) =>
+  values
+    .flatMap((value) => String(value || '').split(','))
+    .map(normalizeOrigin)
+    .filter(Boolean);
+const allowedOrigins = new Set(parseOriginList(DEFAULT_ALLOWED_ORIGINS.join(','), process.env.ALLOWED_ORIGINS, process.env.FRONTEND_URL));
 const parseJsonArray = (value) => {
   if (Array.isArray(value)) return value;
   if (typeof value !== 'string' || !value.trim()) return [];
@@ -53,6 +71,22 @@ const mapPackageRow = (row) => ({
   ...row,
   packageItems: sanitizePackageItems(row.packageItems),
 });
+const isOriginAllowed = (origin = '') => {
+  const normalizedOrigin = normalizeOrigin(origin);
+  if (!normalizedOrigin) return false;
+  return allowedOrigins.has(normalizedOrigin);
+};
+const corsOptionsDelegate = (req, callback) => {
+  const requestOrigin = req.header('Origin');
+  const shouldAllowCors = !requestOrigin || isOriginAllowed(requestOrigin);
+
+  callback(null, {
+    origin: shouldAllowCors,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
+    optionsSuccessStatus: 204,
+  });
+};
 const createTokenSignature = (payload) =>
   crypto.createHmac('sha256', ADMIN_TOKEN_SECRET).update(payload).digest('base64url');
 const createAdminToken = (admin) => {
@@ -120,6 +154,14 @@ const requireAdminAuth = async (req, res, next) => {
     res.status(401).json({ error: 'Unauthorized' });
   }
 };
+
+if (process.env.VERCEL && !process.env.ALLOWED_ORIGINS && !process.env.FRONTEND_URL) {
+  console.warn('ALLOWED_ORIGINS is not set. Only localhost frontend origins are allowed by default.');
+}
+
+// Middleware
+app.use(cors(corsOptionsDelegate));
+app.use(express.json());
 
 // Initialize DB tables — store promise so routes can await it
 const dbReady = initDB().catch(console.error);
