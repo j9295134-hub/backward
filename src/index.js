@@ -16,6 +16,39 @@ app.use(express.json());
 // Helper function to generate IDs
 const getId = () => Math.random().toString(36).substring(2, 11);
 const normalizeTrackingId = (value = '') => value.trim().replace(/\s+/g, '').toUpperCase();
+const parseJsonArray = (value) => {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return [];
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+const sanitizePackageItems = (value) =>
+  parseJsonArray(value)
+    .map((item) => {
+      const quantity = Math.max(1, Math.round(Number(item?.quantity) || 1));
+      const name = String(item?.name ?? '').trim();
+      const imageUrl = String(item?.imageUrl ?? item?.image_url ?? '').trim();
+      const productId = String(item?.productId ?? item?.product_id ?? '').trim();
+
+      if (!name) return null;
+
+      return {
+        productId: productId || undefined,
+        name,
+        imageUrl,
+        quantity,
+      };
+    })
+    .filter(Boolean);
+const mapPackageRow = (row) => ({
+  ...row,
+  packageItems: sanitizePackageItems(row.packageItems),
+});
 
 // Initialize DB tables — store promise so routes can await it
 const dbReady = initDB().catch(console.error);
@@ -185,7 +218,7 @@ app.get('/api/orders/:id', async (req, res) => {
 app.get('/api/packages', async (req, res) => {
   try {
     const result = await client.execute('SELECT * FROM packages ORDER BY createdAt DESC');
-    res.json(result.rows);
+    res.json(result.rows.map(mapPackageRow));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -197,23 +230,24 @@ app.get('/api/packages/track/:trackingId', async (req, res) => {
     if (!trackingId) return res.status(400).json({ error: 'Tracking ID is required' });
     const result = await client.execute({ sql: 'SELECT * FROM packages WHERE UPPER(TRIM(trackingId)) = ?', args: [trackingId] });
     if (!result.rows[0]) return res.status(404).json({ error: 'Package not found' });
-    res.json(result.rows[0]);
+    res.json(mapPackageRow(result.rows[0]));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/packages', async (req, res) => {
-  const { trackingId, orderId, status, shippingRoute, origin, destination, currentLocation, estimatedDelivery, weight, notes } = req.body;
+  const { trackingId, orderId, status, shippingRoute, origin, destination, currentLocation, estimatedDelivery, weight, notes, packageItems } = req.body;
   const id = getId();
   const normalizedTrackingId = normalizeTrackingId(trackingId ?? '');
+  const normalizedPackageItems = sanitizePackageItems(packageItems);
   try {
     if (!normalizedTrackingId) return res.status(400).json({ error: 'Tracking ID is required' });
     await client.execute({
-      sql: 'INSERT INTO packages (id, trackingId, orderId, status, shippingRoute, origin, destination, currentLocation, estimatedDelivery, weight, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      args: [id, normalizedTrackingId, orderId ?? null, status ?? 'pending', shippingRoute ?? 'sea', origin ?? null, destination ?? null, currentLocation ?? null, estimatedDelivery ?? null, weight ?? null, notes ?? null],
+      sql: 'INSERT INTO packages (id, trackingId, orderId, status, shippingRoute, origin, destination, currentLocation, estimatedDelivery, weight, notes, packageItems) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [id, normalizedTrackingId, orderId ?? null, status ?? 'pending', shippingRoute ?? 'sea', origin ?? null, destination ?? null, currentLocation ?? null, estimatedDelivery ?? null, weight ?? null, notes ?? null, JSON.stringify(normalizedPackageItems)],
     });
-    res.status(201).json({ id, trackingId: normalizedTrackingId, orderId, status: status || 'pending', shippingRoute: shippingRoute || 'sea', origin, destination, currentLocation, estimatedDelivery, weight, notes });
+    res.status(201).json({ id, trackingId: normalizedTrackingId, orderId, status: status || 'pending', shippingRoute: shippingRoute || 'sea', origin, destination, currentLocation, estimatedDelivery, weight, notes, packageItems: normalizedPackageItems });
   } catch (err) {
     if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Tracking ID already exists' });
     res.status(500).json({ error: err.message });
@@ -221,14 +255,52 @@ app.post('/api/packages', async (req, res) => {
 });
 
 app.put('/api/packages/:id', async (req, res) => {
-  const { status, shippingRoute, currentLocation, estimatedDelivery, notes } = req.body;
   try {
+    const existingResult = await client.execute({ sql: 'SELECT * FROM packages WHERE id = ?', args: [req.params.id] });
+    const existingPackage = existingResult.rows[0];
+
+    if (!existingPackage) return res.status(404).json({ error: 'Package not found' });
+
+    const normalizedTrackingId = normalizeTrackingId(req.body.trackingId ?? existingPackage.trackingId ?? '');
+    const normalizedPackageItems =
+      req.body.packageItems === undefined
+        ? sanitizePackageItems(existingPackage.packageItems)
+        : sanitizePackageItems(req.body.packageItems);
+
+    if (!normalizedTrackingId) return res.status(400).json({ error: 'Tracking ID is required' });
+
+    const updatedPackage = {
+      trackingId: normalizedTrackingId,
+      orderId: req.body.orderId ?? existingPackage.orderId ?? null,
+      status: req.body.status ?? existingPackage.status ?? 'pending',
+      shippingRoute: req.body.shippingRoute ?? existingPackage.shippingRoute ?? 'sea',
+      origin: req.body.origin ?? existingPackage.origin ?? null,
+      destination: req.body.destination ?? existingPackage.destination ?? null,
+      currentLocation: req.body.currentLocation ?? existingPackage.currentLocation ?? null,
+      estimatedDelivery: req.body.estimatedDelivery ?? existingPackage.estimatedDelivery ?? null,
+      notes: req.body.notes ?? existingPackage.notes ?? null,
+      packageItems: normalizedPackageItems,
+    };
+
     await client.execute({
-      sql: 'UPDATE packages SET status = ?, shippingRoute = ?, currentLocation = ?, estimatedDelivery = ?, notes = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
-      args: [status ?? null, shippingRoute ?? null, currentLocation ?? null, estimatedDelivery ?? null, notes ?? null, req.params.id],
+      sql: 'UPDATE packages SET trackingId = ?, orderId = ?, status = ?, shippingRoute = ?, origin = ?, destination = ?, currentLocation = ?, estimatedDelivery = ?, notes = ?, packageItems = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
+      args: [
+        updatedPackage.trackingId,
+        updatedPackage.orderId,
+        updatedPackage.status,
+        updatedPackage.shippingRoute,
+        updatedPackage.origin,
+        updatedPackage.destination,
+        updatedPackage.currentLocation,
+        updatedPackage.estimatedDelivery,
+        updatedPackage.notes,
+        JSON.stringify(updatedPackage.packageItems),
+        req.params.id,
+      ],
     });
-    res.json({ id: req.params.id, status, shippingRoute, currentLocation, estimatedDelivery, notes });
+    res.json({ id: req.params.id, ...updatedPackage });
   } catch (err) {
+    if (err.message.includes('UNIQUE')) return res.status(400).json({ error: 'Tracking ID already exists' });
     res.status(500).json({ error: err.message });
   }
 });

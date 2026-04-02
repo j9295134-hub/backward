@@ -7,6 +7,17 @@ const client = createClient({
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
+const getColumnName = (row) => String(row.name ?? row.NAME ?? row[1] ?? '');
+
+async function ensureColumnExists(tableName, columnName, definition) {
+  const result = await client.execute(`PRAGMA table_info(${tableName})`);
+  const hasColumn = result.rows.some((row) => getColumnName(row) === columnName);
+
+  if (!hasColumn) {
+    await client.execute(`ALTER TABLE ${tableName} ADD COLUMN ${definition}`);
+  }
+}
+
 export async function initDB() {
   await client.batch([
     `CREATE TABLE IF NOT EXISTS products (
@@ -55,6 +66,7 @@ export async function initDB() {
       estimatedDelivery TEXT,
       weight REAL,
       notes TEXT,
+      packageItems TEXT DEFAULT '[]',
       createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
     )`,
@@ -71,6 +83,8 @@ export async function initDB() {
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
     )`,
   ], 'deferred');
+
+  await ensureColumnExists('packages', 'packageItems', `packageItems TEXT DEFAULT '[]'`);
 
   // Seed default settings from env vars (only if not already set)
   const defaultWhatsappNumber = process.env.VITE_WHATSAPP_NUMBER || process.env.WHATSAPP_NUMBER || '';
