@@ -49,6 +49,47 @@ const parseJsonArray = (value) => {
     return [];
   }
 };
+const sanitizeProductImages = (...values) => {
+  const seen = new Set();
+
+  return values
+    .flatMap((value) => {
+      if (Array.isArray(value)) return value;
+
+      if (typeof value === 'string') {
+        const trimmedValue = value.trim();
+        if (!trimmedValue) return [];
+
+        try {
+          const parsedValue = JSON.parse(trimmedValue);
+          if (Array.isArray(parsedValue)) {
+            return parsedValue;
+          }
+        } catch {
+          return [trimmedValue];
+        }
+
+        return [trimmedValue];
+      }
+
+      return [];
+    })
+    .map((item) => String(item ?? '').trim())
+    .filter((item) => {
+      if (!item || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    });
+};
+const mapProductRow = (row) => {
+  const images = sanitizeProductImages(row.images, row.image);
+
+  return {
+    ...row,
+    image: images[0] || '',
+    images,
+  };
+};
 const sanitizePackageItems = (value) =>
   parseJsonArray(value)
     .map((item) => {
@@ -177,7 +218,7 @@ app.use(async (_req, _res, next) => {
 app.get('/api/products', async (req, res) => {
   try {
     const result = await client.execute('SELECT * FROM products ORDER BY createdAt DESC');
-    res.json(result.rows);
+    res.json(result.rows.map(mapProductRow));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -187,34 +228,107 @@ app.get('/api/products/:id', async (req, res) => {
   try {
     const result = await client.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
     if (!result.rows[0]) return res.status(404).json({ error: 'Product not found' });
-    res.json(result.rows[0]);
+    res.json(mapProductRow(result.rows[0]));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/products', requireAdminAuth, async (req, res) => {
-  const { name, description, price, categoryId, image, stock, isFeatured, status, estimatedDelivery } = req.body;
+  const { name, description, price, categoryId, image, images, stock, isFeatured, status, estimatedDelivery } = req.body;
   const id = getId();
   try {
+    const normalizedImages = sanitizeProductImages(images, image);
+    const coverImage = normalizedImages[0] || '';
+
     await client.execute({
-      sql: 'INSERT INTO products (id, name, description, price, categoryId, image, stock, isFeatured, status, estimatedDelivery) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      args: [id, name ?? null, description ?? null, price ?? null, categoryId ?? null, image ?? null, stock ?? 0, isFeatured ? 1 : 0, status ?? 'in_stock', estimatedDelivery ?? null],
+      sql: 'INSERT INTO products (id, name, description, price, categoryId, image, images, stock, isFeatured, status, estimatedDelivery) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [
+        id,
+        name ?? null,
+        description ?? null,
+        price ?? null,
+        categoryId ?? null,
+        coverImage || null,
+        JSON.stringify(normalizedImages),
+        stock ?? 0,
+        isFeatured ? 1 : 0,
+        status ?? 'in_stock',
+        estimatedDelivery ?? null,
+      ],
     });
-    res.status(201).json({ id, name, description, price, categoryId, image, stock, isFeatured: !!isFeatured, status: status || 'in_stock', estimatedDelivery });
+    res.status(201).json(
+      mapProductRow({
+        id,
+        name,
+        description,
+        price,
+        categoryId,
+        image: coverImage,
+        images: normalizedImages,
+        stock: stock ?? 0,
+        isFeatured: !!isFeatured,
+        status: status || 'in_stock',
+        estimatedDelivery,
+      })
+    );
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 app.put('/api/products/:id', requireAdminAuth, async (req, res) => {
-  const { name, description, price, categoryId, image, stock, isFeatured, status, estimatedDelivery } = req.body;
   try {
+    const existingResult = await client.execute({ sql: 'SELECT * FROM products WHERE id = ?', args: [req.params.id] });
+    const existingProduct = existingResult.rows[0];
+
+    if (!existingProduct) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    const normalizedImages = sanitizeProductImages(
+      req.body.images === undefined && req.body.image === undefined ? existingProduct.images : req.body.images,
+      req.body.image ?? existingProduct.image
+    );
+    const coverImage = normalizedImages[0] || '';
+    const updatedProduct = {
+      name: req.body.name ?? existingProduct.name ?? null,
+      description: req.body.description ?? existingProduct.description ?? null,
+      price: req.body.price ?? existingProduct.price ?? null,
+      categoryId: req.body.categoryId ?? existingProduct.categoryId ?? null,
+      image: coverImage || null,
+      images: normalizedImages,
+      stock: req.body.stock ?? existingProduct.stock ?? 0,
+      isFeatured:
+        req.body.isFeatured === undefined
+          ? existingProduct.isFeatured === 1 || existingProduct.isFeatured === true
+          : !!req.body.isFeatured,
+      status: req.body.status ?? existingProduct.status ?? 'in_stock',
+      estimatedDelivery: req.body.estimatedDelivery ?? existingProduct.estimatedDelivery ?? null,
+    };
+
     await client.execute({
-      sql: 'UPDATE products SET name = ?, description = ?, price = ?, categoryId = ?, image = ?, stock = ?, isFeatured = ?, status = ?, estimatedDelivery = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
-      args: [name ?? null, description ?? null, price ?? null, categoryId ?? null, image ?? null, stock ?? null, isFeatured ? 1 : 0, status ?? null, estimatedDelivery ?? null, req.params.id],
+      sql: 'UPDATE products SET name = ?, description = ?, price = ?, categoryId = ?, image = ?, images = ?, stock = ?, isFeatured = ?, status = ?, estimatedDelivery = ?, updatedAt = CURRENT_TIMESTAMP WHERE id = ?',
+      args: [
+        updatedProduct.name,
+        updatedProduct.description,
+        updatedProduct.price,
+        updatedProduct.categoryId,
+        updatedProduct.image,
+        JSON.stringify(updatedProduct.images),
+        updatedProduct.stock,
+        updatedProduct.isFeatured ? 1 : 0,
+        updatedProduct.status,
+        updatedProduct.estimatedDelivery,
+        req.params.id,
+      ],
     });
-    res.json({ id: req.params.id, name, description, price, categoryId, image, stock, isFeatured: !!isFeatured, status, estimatedDelivery });
+    res.json(
+      mapProductRow({
+        id: req.params.id,
+        ...updatedProduct,
+      })
+    );
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -75,6 +75,7 @@ export async function initDB() {
       price REAL NOT NULL,
       categoryId TEXT,
       image TEXT,
+      images TEXT DEFAULT '[]',
       stock INTEGER DEFAULT 0,
       isFeatured INTEGER DEFAULT 0,
       status TEXT DEFAULT 'in_stock',
@@ -132,6 +133,7 @@ export async function initDB() {
     )`,
   ], 'deferred');
 
+  await ensureColumnExists('products', 'images', `images TEXT DEFAULT '[]'`);
   await ensureColumnExists('packages', 'packageItems', `packageItems TEXT DEFAULT '[]'`);
 
   // Seed default settings from env vars (only if not already set)
